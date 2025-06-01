@@ -1,14 +1,14 @@
 {
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "thinking-partner-mcp-raycast",
-  "title": "thinking-partner-mcp-raycast",
+  "title": "Thinking Partner Mcp Raycast",
   "description": "AI Extension that acts as an MCP client for thinking-partner-mcp server.",
   "icon": "extension-icon.png",
   "author": "nwant01",
   "license": "MIT",
   "commands": [
     {
-      "name": "quick-focus",
+      "name": "quick-focus-mcp",
       "title": "Thinking Partner",
       "subtitle": "Quick Focus",
       "description": "View current focus, set new focus,or show focus history",
@@ -16,7 +16,7 @@
     }
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^0.4.0",
     "@raycast/api": "^1.99.2",
     "@raycast/utils": "^1.17.0"
   },

@@ -1,49 +1,69 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { homedir } from "os";
-import { join } from "path";
 import { existsSync } from "fs";
-
-export interface Focus {
-  id: string;
-  topic: string;
-  context: string;
-  tool: "desktop" | "code";
-  status: "active" | "completed";
-  startedAt: string;
-  completedAt?: string;
-}
-
-export interface CurrentFocusResource {
-  currentFocus: Focus | null;
-  recentContext: unknown[];
-}
-
-export interface SetFocusParams {
-  topic: string;
-  context?: string;
-  tool?: "desktop" | "code";
-}
+import { Focus, CurrentFocusResource, SetFocusParams } from "./types";
+import { config } from "./config";
+import { execSync } from "child_process";
 
 let client: Client | null = null;
 let transport: StdioClientTransport | null = null;
+let connectionPromise: Promise<Client> | null = null;
+
+function findNodeBinary(): string {
+  for (const nodePath of config.node.paths) {
+    try {
+      if (nodePath === "node") {
+        // Try to use node from PATH
+        execSync("node --version", { stdio: "ignore" });
+        return "node";
+      } else if (existsSync(nodePath)) {
+        // Check if the binary exists and is executable
+        execSync(`${nodePath} --version`, { stdio: "ignore" });
+        return nodePath;
+      }
+    } catch {
+      // Continue to next path
+    }
+  }
+  throw new Error("Node.js not found. Please ensure Node.js is installed.");
+}
 
 export async function connectToMCP(): Promise<Client> {
-  if (client) {
+  // Return existing client if connected
+  if (client && transport) {
     return client;
   }
 
-  const serverPath = join(homedir(), "projects", "thinking-partner-mcp", "src", "index.js");
+  // Return existing connection attempt if in progress
+  if (connectionPromise) {
+    return connectionPromise;
+  }
 
-  console.log("Connecting to MCP server at:", serverPath);
+  // Start new connection
+  connectionPromise = doConnect();
+  
+  try {
+    const result = await connectionPromise;
+    return result;
+  } catch (error) {
+    connectionPromise = null;
+    throw error;
+  }
+}
+
+async function doConnect(): Promise<Client> {
+  const { serverPath } = config.mcp;
 
   if (!existsSync(serverPath)) {
-    throw new Error(`MCP server not found at ${serverPath}. Please ensure thinking-partner-mcp is installed.`);
+    throw new Error(`MCP server not found at ${serverPath}. Please ensure ${config.mcp.serverName} is installed.`);
   }
+
+  const nodeBinary = findNodeBinary();
+  console.log("Creating transport with node binary:", nodeBinary);
 
   try {
     transport = new StdioClientTransport({
-      command: "node",
+      command: nodeBinary,
       args: [serverPath],
       env: {
         ...process.env,
@@ -51,38 +71,74 @@ export async function connectToMCP(): Promise<Client> {
       },
     });
 
-    client = new Client(
-      {
-        name: "thinking-partner-raycast",
-        version: "1.0.0",
+    // Create client first
+    const newClient = new Client({
+      name: config.mcp.clientName,
+      version: config.mcp.clientVersion,
+      capabilities: {
+        tools: {},
+        resources: {},
       },
-      {
-        capabilities: {
-          tools: {},
-          resources: { subscribe: false },
-        },
-      },
-    );
+    });
 
-    await client.connect(transport);
-    console.log("Successfully connected to MCP server");
 
-    // List available tools for debugging
-    const tools = await client.listTools();
-    console.log("Available MCP tools:", tools);
+    console.log("Connecting with node:", nodeBinary, "to server:", serverPath);
+    
+    try {
+      await newClient.connect(transport);
+      console.log("Client connected successfully");
+      
+      // Only set the global client after successful connection
+      client = newClient;
+      
+      // Set up error handlers after connection
+      transport.onerror = (error) => {
+        console.error("Transport error:", error);
+      };
 
+      transport.onclose = () => {
+        console.log("Transport closed");
+        if (client === newClient) {
+          client = null;
+          transport = null;
+        }
+      };
+      
+      // Wait a bit for the connection to stabilize
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Test the connection
+      try {
+        await client.ping();
+        console.log("Ping successful");
+      } catch (pingError) {
+        console.error("Ping failed:", pingError);
+      }
+    } catch (connectError) {
+      console.error("Connection error:", connectError);
+      throw connectError;
+    }
+
+    connectionPromise = null;
     return client;
   } catch (error) {
-    console.error("Failed to connect to MCP server:", error);
+    console.error("Connection failed:", error);
     client = null;
     transport = null;
-    throw new Error(`MCP connection failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    connectionPromise = null;
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    throw new Error(`Failed to connect to thinking-partner-mcp server: ${errorMessage}`);
   }
 }
 
 export async function disconnectFromMCP(): Promise<void> {
+  connectionPromise = null;
   if (client) {
-    await client.close();
+    try {
+      await client.close();
+    } catch (error) {
+      console.error("Error closing client:", error);
+    }
     client = null;
     transport = null;
   }
@@ -91,15 +147,28 @@ export async function disconnectFromMCP(): Promise<void> {
 export async function getCurrentFocus(): Promise<CurrentFocusResource> {
   const mcpClient = await connectToMCP();
 
-  const response = await mcpClient.readResource({
-    uri: "thinking-partner://current-focus",
-  });
+  try {
+    // Use get_context tool to retrieve current focus
+    const response = await mcpClient.callTool({
+      name: "get_context",
+      arguments: {
+        tool: config.defaults.tool,
+        scope: "current",
+      },
+    });
 
-  if (response.contents && response.contents.length > 0) {
-    const content = response.contents[0];
-    if (content.text) {
-      return JSON.parse(content.text as string);
+    if (response.content && Array.isArray(response.content) && response.content.length > 0) {
+      const content = response.content[0];
+      if ("text" in content && typeof content.text === "string") {
+        const result = JSON.parse(content.text);
+        return {
+          currentFocus: result.currentFocus || null,
+          recentContext: result.recentContext || [],
+        };
+      }
     }
+  } catch (error) {
+    console.error("Failed to get current focus:", error);
   }
 
   return { currentFocus: null, recentContext: [] };
@@ -113,7 +182,7 @@ export async function setFocus(params: SetFocusParams): Promise<Focus> {
     arguments: {
       topic: params.topic,
       context: params.context || "",
-      tool: params.tool || "desktop",
+      tool: params.tool || config.defaults.tool,
     },
   });
 
@@ -131,20 +200,24 @@ export async function setFocus(params: SetFocusParams): Promise<Focus> {
 export async function getFocusHistory(): Promise<Focus[]> {
   const mcpClient = await connectToMCP();
 
-  const response = await mcpClient.callTool({
-    name: "get_context",
-    arguments: {
-      tool: "desktop",
-      scope: "all",
-    },
-  });
+  try {
+    const response = await mcpClient.callTool({
+      name: "get_context",
+      arguments: {
+        tool: config.defaults.tool,
+        scope: "all",
+      },
+    });
 
-  if (response.content && Array.isArray(response.content) && response.content.length > 0) {
-    const content = response.content[0];
-    if ("text" in content && typeof content.text === "string") {
-      const result = JSON.parse(content.text);
-      return result.focusHistory || [];
+    if (response.content && Array.isArray(response.content) && response.content.length > 0) {
+      const content = response.content[0];
+      if ("text" in content && typeof content.text === "string") {
+        const result = JSON.parse(content.text);
+        return result.focusHistory || [];
+      }
     }
+  } catch (error) {
+    console.error("Failed to get focus history:", error);
   }
 
   return [];

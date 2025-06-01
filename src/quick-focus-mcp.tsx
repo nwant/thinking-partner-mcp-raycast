@@ -1,6 +1,8 @@
 import { Action, ActionPanel, Form, List, showToast, Toast, Icon, Color } from "@raycast/api";
 import { useState, useEffect } from "react";
-import { getCurrentFocus, setFocus, getFocusHistory, Focus, disconnectFromMCP } from "./mcp-client";
+import { getCurrentFocus, setFocus, getFocusHistory, disconnectFromMCP } from "./mcp-client";
+import { Focus } from "./types";
+import { formatDate } from "./utils";
 
 export default function Command() {
   const [currentFocus, setCurrentFocus] = useState<Focus | null>(null);
@@ -10,27 +12,51 @@ export default function Command() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    showToast({
+      style: Toast.Style.Animated,
+      title: "Connecting to MCP server...",
+    });
     loadFocusData();
     return () => {
-      disconnectFromMCP().catch(console.error);
+      disconnectFromMCP().catch((err) => {
+        console.error("Disconnect error:", err);
+      });
     };
   }, []);
 
   async function loadFocusData() {
     try {
       setIsLoading(true);
-      const [focusData, history] = await Promise.all([getCurrentFocus(), getFocusHistory()]);
+      setError(null);
+      
+      showToast({
+        style: Toast.Style.Animated,
+        title: "Loading focus data...",
+      });
+      
+      // Get focus data sequentially to avoid connection race conditions
+      const focusData = await getCurrentFocus();
+      const history = await getFocusHistory();
+      
       setCurrentFocus(focusData.currentFocus);
       setFocusHistory(history);
-      setError(null); // Clear any previous errors
+      
+      showToast({
+        style: Toast.Style.Success,
+        title: "Connected to MCP server",
+      });
     } catch (err) {
       console.error("Failed to load focus data:", err);
       const errorMessage = err instanceof Error ? err.message : "Unknown error";
       setError(errorMessage);
       showToast({
         style: Toast.Style.Failure,
-        title: "Failed to connect to MCP server",
+        title: "Connection failed",
         message: errorMessage,
+        primaryAction: {
+          title: "Retry",
+          onAction: () => loadFocusData(),
+        },
       });
     } finally {
       setIsLoading(false);
@@ -161,20 +187,4 @@ export default function Command() {
       )}
     </List>
   );
-}
-
-function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-
-  return date.toLocaleDateString();
 }
