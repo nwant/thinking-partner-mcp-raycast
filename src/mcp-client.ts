@@ -111,6 +111,15 @@ async function doConnect(): Promise<Client> {
       try {
         await client.ping();
         console.log("Ping successful");
+        
+        // List available tools to understand the API
+        const tools = await client.listTools();
+        console.log("Available tools:", JSON.stringify(tools, null, 2));
+        
+        // Log each tool name clearly
+        if (tools.tools) {
+          console.log("Tool names:", tools.tools.map((t: any) => t.name).join(", "));
+        }
       } catch (pingError) {
         console.error("Ping failed:", pingError);
       }
@@ -157,10 +166,23 @@ export async function getCurrentFocus(): Promise<CurrentFocusResource> {
       },
     });
 
+    console.log("get_context (current) response:", JSON.stringify(response, null, 2));
+
     if (response.content && Array.isArray(response.content) && response.content.length > 0) {
       const content = response.content[0];
       if ("text" in content && typeof content.text === "string") {
         const result = JSON.parse(content.text);
+        console.log("Parsed current focus result:", result);
+        
+        // The MCP server returns: { success: true, context: { currentFocus: {...}, ... } }
+        if (result.success && result.context) {
+          return {
+            currentFocus: result.context.currentFocus || null,
+            recentContext: result.context.recentDecisions || [],
+          };
+        }
+        
+        // Fallback for different structures
         return {
           currentFocus: result.currentFocus || null,
           recentContext: result.recentContext || [],
@@ -177,6 +199,8 @@ export async function getCurrentFocus(): Promise<CurrentFocusResource> {
 export async function setFocus(params: SetFocusParams): Promise<Focus> {
   const mcpClient = await connectToMCP();
 
+  console.log("Calling set_focus with params:", params);
+
   const response = await mcpClient.callTool({
     name: "set_focus",
     arguments: {
@@ -186,11 +210,23 @@ export async function setFocus(params: SetFocusParams): Promise<Focus> {
     },
   });
 
+  console.log("set_focus response:", JSON.stringify(response, null, 2));
+
   if (response.content && Array.isArray(response.content) && response.content.length > 0) {
     const content = response.content[0];
     if ("text" in content && typeof content.text === "string") {
       const result = JSON.parse(content.text);
-      return result.currentFocus;
+      console.log("Parsed set_focus result:", result);
+      
+      // The MCP server likely returns the new focus in a similar structure
+      if (result.success && result.focus) {
+        return result.focus;
+      } else if (result.success && result.currentFocus) {
+        return result.currentFocus;
+      }
+      
+      // Fallback
+      return result.currentFocus || result;
     }
   }
 
@@ -201,21 +237,79 @@ export async function getFocusHistory(): Promise<Focus[]> {
   const mcpClient = await connectToMCP();
 
   try {
-    const response = await mcpClient.callTool({
-      name: "get_context",
-      arguments: {
-        tool: config.defaults.tool,
-        scope: "all",
-      },
-    });
+    // Try different scope values to see if any returns history
+    const scopes = ["history", "all", "past", "focuses"];
+    
+    for (const scope of scopes) {
+      try {
+        console.log(`Trying get_context with scope: ${scope}`);
+        const response = await mcpClient.callTool({
+          name: "get_context",
+          arguments: {
+            tool: config.defaults.tool,
+            scope: scope,
+          },
+        });
 
-    if (response.content && Array.isArray(response.content) && response.content.length > 0) {
-      const content = response.content[0];
-      if ("text" in content && typeof content.text === "string") {
-        const result = JSON.parse(content.text);
-        return result.focusHistory || [];
+        console.log(`get_context (${scope}) response:`, JSON.stringify(response, null, 2));
+
+        if (response.content && Array.isArray(response.content) && response.content.length > 0) {
+          const content = response.content[0];
+          if ("text" in content && typeof content.text === "string") {
+            const result = JSON.parse(content.text);
+            console.log(`Parsed ${scope} result:`, result);
+            
+            // Check if this scope returns history
+            if (result.success && result.context) {
+              // Check for various possible history fields
+              const history = result.context.focusHistory || 
+                            result.context.history || 
+                            result.context.focuses ||
+                            result.context.allFocuses ||
+                            result.context.pastFocuses ||
+                            [];
+              
+              if (Array.isArray(history) && history.length > 0) {
+                console.log(`Found history with scope '${scope}':`, history);
+                return history;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`Scope '${scope}' failed:`, error);
       }
     }
+    
+    // If no history found, at least return the current focus as history
+    console.log("No focus history found with any scope, trying to get current focus as fallback");
+    
+    try {
+      const currentResponse = await mcpClient.callTool({
+        name: "get_context",
+        arguments: {
+          tool: config.defaults.tool,
+          scope: "current",
+        },
+      });
+      
+      if (currentResponse.content && Array.isArray(currentResponse.content) && currentResponse.content.length > 0) {
+        const content = currentResponse.content[0];
+        if ("text" in content && typeof content.text === "string") {
+          const result = JSON.parse(content.text);
+          if (result.success && result.context && result.context.currentFocus) {
+            // Return current focus as a single-item history
+            console.log("Returning current focus as history fallback");
+            return [result.context.currentFocus];
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Failed to get current focus as fallback:", error);
+    }
+    
+    return [];
+    
   } catch (error) {
     console.error("Failed to get focus history:", error);
   }
