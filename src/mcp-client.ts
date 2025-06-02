@@ -59,7 +59,6 @@ async function doConnect(): Promise<Client> {
   }
 
   const nodeBinary = findNodeBinary();
-  console.log("Creating transport with node binary:", nodeBinary);
 
   try {
     transport = new StdioClientTransport({
@@ -82,11 +81,8 @@ async function doConnect(): Promise<Client> {
     });
 
 
-    console.log("Connecting with node:", nodeBinary, "to server:", serverPath);
-    
     try {
       await newClient.connect(transport);
-      console.log("Client connected successfully");
       
       // Only set the global client after successful connection
       client = newClient;
@@ -97,7 +93,6 @@ async function doConnect(): Promise<Client> {
       };
 
       transport.onclose = () => {
-        console.log("Transport closed");
         if (client === newClient) {
           client = null;
           transport = null;
@@ -106,23 +101,6 @@ async function doConnect(): Promise<Client> {
       
       // Wait a bit for the connection to stabilize
       await new Promise(resolve => setTimeout(resolve, 100));
-      
-      // Test the connection
-      try {
-        await client.ping();
-        console.log("Ping successful");
-        
-        // List available tools to understand the API
-        const tools = await client.listTools();
-        console.log("Available tools:", JSON.stringify(tools, null, 2));
-        
-        // Log each tool name clearly
-        if (tools.tools) {
-          console.log("Tool names:", tools.tools.map((t: any) => t.name).join(", "));
-        }
-      } catch (pingError) {
-        console.error("Ping failed:", pingError);
-      }
     } catch (connectError) {
       console.error("Connection error:", connectError);
       throw connectError;
@@ -166,13 +144,10 @@ export async function getCurrentFocus(): Promise<CurrentFocusResource> {
       },
     });
 
-    console.log("get_context (current) response:", JSON.stringify(response, null, 2));
-
     if (response.content && Array.isArray(response.content) && response.content.length > 0) {
       const content = response.content[0];
       if ("text" in content && typeof content.text === "string") {
         const result = JSON.parse(content.text);
-        console.log("Parsed current focus result:", result);
         
         // The MCP server returns: { success: true, context: { currentFocus: {...}, ... } }
         if (result.success && result.context) {
@@ -199,8 +174,6 @@ export async function getCurrentFocus(): Promise<CurrentFocusResource> {
 export async function setFocus(params: SetFocusParams): Promise<Focus> {
   const mcpClient = await connectToMCP();
 
-  console.log("Calling set_focus with params:", params);
-
   const response = await mcpClient.callTool({
     name: "set_focus",
     arguments: {
@@ -210,13 +183,10 @@ export async function setFocus(params: SetFocusParams): Promise<Focus> {
     },
   });
 
-  console.log("set_focus response:", JSON.stringify(response, null, 2));
-
   if (response.content && Array.isArray(response.content) && response.content.length > 0) {
     const content = response.content[0];
     if ("text" in content && typeof content.text === "string") {
       const result = JSON.parse(content.text);
-      console.log("Parsed set_focus result:", result);
       
       // The MCP server likely returns the new focus in a similar structure
       if (result.success && result.focus) {
@@ -237,75 +207,51 @@ export async function getFocusHistory(): Promise<Focus[]> {
   const mcpClient = await connectToMCP();
 
   try {
-    // Try different scope values to see if any returns history
-    const scopes = ["history", "all", "past", "focuses"];
-    
-    for (const scope of scopes) {
-      try {
-        console.log(`Trying get_context with scope: ${scope}`);
-        const response = await mcpClient.callTool({
-          name: "get_context",
-          arguments: {
-            tool: config.defaults.tool,
-            scope: scope,
-          },
-        });
+    // First try the new get_focus_history tool
+    try {
+      const response = await mcpClient.callTool({
+        name: "get_focus_history",
+        arguments: {
+          tool: config.defaults.tool,
+          limit: 50, // Get last 50 focuses
+        },
+      });
 
-        console.log(`get_context (${scope}) response:`, JSON.stringify(response, null, 2));
-
-        if (response.content && Array.isArray(response.content) && response.content.length > 0) {
-          const content = response.content[0];
-          if ("text" in content && typeof content.text === "string") {
-            const result = JSON.parse(content.text);
-            console.log(`Parsed ${scope} result:`, result);
-            
-            // Check if this scope returns history
-            if (result.success && result.context) {
-              // Check for various possible history fields
-              const history = result.context.focusHistory || 
-                            result.context.history || 
-                            result.context.focuses ||
-                            result.context.allFocuses ||
-                            result.context.pastFocuses ||
-                            [];
-              
-              if (Array.isArray(history) && history.length > 0) {
-                console.log(`Found history with scope '${scope}':`, history);
-                return history;
-              }
-            }
+      if (response.content && Array.isArray(response.content) && response.content.length > 0) {
+        const content = response.content[0];
+        if ("text" in content && typeof content.text === "string") {
+          const result = JSON.parse(content.text);
+          if (result.success && result.focusHistory) {
+            return result.focusHistory;
           }
         }
-      } catch (error) {
-        console.log(`Scope '${scope}' failed:`, error);
       }
+    } catch {
+      // get_focus_history tool not available, fall back to get_context
     }
     
-    // If no history found, at least return the current focus as history
-    console.log("No focus history found with any scope, trying to get current focus as fallback");
-    
+    // Fallback to enhanced get_context with scope "all"
     try {
-      const currentResponse = await mcpClient.callTool({
+      const response = await mcpClient.callTool({
         name: "get_context",
         arguments: {
           tool: config.defaults.tool,
-          scope: "current",
+          scope: "all",
         },
       });
-      
-      if (currentResponse.content && Array.isArray(currentResponse.content) && currentResponse.content.length > 0) {
-        const content = currentResponse.content[0];
+
+      if (response.content && Array.isArray(response.content) && response.content.length > 0) {
+        const content = response.content[0];
         if ("text" in content && typeof content.text === "string") {
           const result = JSON.parse(content.text);
-          if (result.success && result.context && result.context.currentFocus) {
-            // Return current focus as a single-item history
-            console.log("Returning current focus as history fallback");
-            return [result.context.currentFocus];
+          // The enhanced server now returns focusHistory with scope "all"
+          if (result.success && result.context && result.context.focusHistory) {
+            return result.context.focusHistory;
           }
         }
       }
     } catch (error) {
-      console.error("Failed to get current focus as fallback:", error);
+      console.error("Failed to get focus history with get_context:", error);
     }
     
     return [];
